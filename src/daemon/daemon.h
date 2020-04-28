@@ -50,7 +50,7 @@ struct VMSpecs
 {
     int num_cores;
     MemorySize mem_size;
-    MemorySize disk_space;
+    optional<MemorySize> disk_space;
     std::string mac_addr;
     std::string ssh_username;
     VirtualMachine::State state;

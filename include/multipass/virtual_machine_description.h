@@ -19,6 +19,7 @@
 #define MULTIPASS_VIRTUAL_MACHINE_DESCRIPTION_H
 
 #include <multipass/memory_size.h>
+#include <multipass/optional.h>
 #include <multipass/vm_image.h>
 #include <string>
 
@@ -34,7 +35,7 @@ public:
 
     int num_cores;
     MemorySize mem_size;
-    MemorySize disk_space;
+    optional<MemorySize> disk_space;
     std::string vm_name;
     std::string mac_addr;
     std::string ssh_username;

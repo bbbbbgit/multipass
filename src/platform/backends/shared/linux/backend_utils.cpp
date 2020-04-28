@@ -18,8 +18,10 @@
 #include "backend_utils.h"
 #include "process_factory.h"
 #include "qemuimg_process_spec.h"
+#include <multipass/constants.h>
 #include <multipass/logging/log.h>
 #include <multipass/memory_size.h>
+#include <multipass/optional.h>
 #include <multipass/process.h>
 #include <multipass/utils.h>
 
@@ -88,8 +90,14 @@ auto virtual_switch_subnet(const QString& bridge_name)
     return subnet.toStdString();
 }
 
-void check_min_img_size(const mp::MemorySize& requested_size, const mp::Path& image_path)
+// Checks the given image size and returns a bool indicating if a resize is needed along with the final size of the
+// disk, even if it does not need to be resized.
+std::pair<bool, mp::MemorySize> img_needs_resize(const mp::optional<mp::MemorySize> requested_size,
+                                                 const mp::Path& image_path)
 {
+    bool resize_needed;
+    mp::MemorySize final_size;
+
     auto qemuimg_process = mp::ProcessFactory::instance().create_process(
         std::make_unique<mp::QemuImgProcessSpec>(QStringList{"info", image_path}));
     auto process_state = qemuimg_process->execute();
@@ -103,15 +111,38 @@ void check_min_img_size(const mp::MemorySize& requested_size, const mp::Path& im
     const auto pattern = QStringLiteral("^virtual size: .+ \\((?<size>\\d+) bytes\\)$");
     const auto re = QRegularExpression{pattern, QRegularExpression::MultilineOption};
 
-    if (const auto match = re.match(img_info); match.hasMatch())
+    const auto match = re.match(img_info);
+
+    if (!match.hasMatch())
+        throw std::runtime_error{fmt::format("Could not obtain image's virtual size")};
+
+    const auto min_size = mp::MemorySize(match.captured("size").toStdString());
+    const auto default_size = mp::MemorySize{mp::default_disk_size};
+
+    // If the requested size is not set, it means the user did not specify a size. Use the default, but only if
+    // it is bigger than the disk size.
+    if (!requested_size)
     {
-        const auto min_size = match.captured("size").toStdString();
-        if (requested_size < mp::MemorySize{min_size})
-            throw std::runtime_error(fmt::format("Requested disk ({} bytes) below minimum for this image ({} bytes)",
-                                                 requested_size.in_bytes(), min_size)); // TODO use human-readable sizes
+        // We need to resize only if the default size is bigger than the image size.
+        resize_needed = default_size > min_size;
+        final_size = resize_needed ? mp::MemorySize(mp::default_disk_size) : min_size;
+    }
+    else if (*requested_size < min_size)
+    {
+        // The user requested a size which is actually smaller than the image size. Impossible to resize.
+        throw std::runtime_error(fmt::format("Requested disk ({} bytes) below minimum for this image ({} bytes)",
+                                             requested_size->in_bytes(),
+                                             min_size.in_bytes())); // TODO use human-readable sizes
     }
     else
-        throw std::runtime_error{fmt::format("Could not obtain image's virtual size")};
+    {
+        // The user specified a size bigger than or equal to the image size and we need to resize only if the
+        // requested size is bigger.
+        resize_needed = *requested_size > min_size;
+        final_size = resize_needed ? *requested_size : min_size;
+    }
+
+    return std::make_pair(resize_needed, final_size);
 }
 
 } // namespace
@@ -153,21 +184,32 @@ std::string mp::backend::get_subnet(const mp::Path& network_dir, const QString& 
     return new_subnet;
 }
 
-void mp::backend::resize_instance_image(const MemorySize& disk_space, const mp::Path& image_path)
+void mp::backend::resize_instance_image(const mp::optional<mp::MemorySize> disk_space, const mp::Path& image_path)
 {
-    check_min_img_size(disk_space, image_path);
+    auto [resize_needed, final_size] = img_needs_resize(disk_space, image_path);
 
-    auto disk_size = QString::number(disk_space.in_bytes()); // format documented in `man qemu-img` (look for "size")
-    auto qemuimg_spec = std::make_unique<mp::QemuImgProcessSpec>(QStringList{"resize", image_path, disk_size});
-    auto qemuimg_process = mp::ProcessFactory::instance().create_process(std::move(qemuimg_spec));
-
-    auto process_state = qemuimg_process->execute(mp::backend::image_resize_timeout);
-    if (!process_state.completed_successfully())
+    if (resize_needed)
     {
-        throw std::runtime_error(fmt::format("Cannot resize instance image: qemu-img failed ({}) with output:\n{}",
-                                             process_state.failure_message(),
-                                             qemuimg_process->read_all_standard_error()));
+        auto disk_size =
+            QString::number(final_size.in_bytes()); // format documented in `man qemu-img` (look for "size")
+        auto qemuimg_spec = std::make_unique<mp::QemuImgProcessSpec>(QStringList{"resize", image_path, disk_size});
+        auto qemuimg_process = mp::ProcessFactory::instance().create_process(std::move(qemuimg_spec));
+
+        mpl::log(mpl::Level::info, "daemon", fmt::format("Resizing disk to {} bytes", disk_size));
+        auto process_state = qemuimg_process->execute(mp::backend::image_resize_timeout);
+        if (!process_state.completed_successfully())
+        {
+            throw std::runtime_error(fmt::format("Cannot resize instance image: qemu-img failed ({}) with output:\n{}",
+                                                 process_state.failure_message(),
+                                                 qemuimg_process->read_all_standard_error()));
+        }
     }
+    else
+    {
+        mpl::log(mpl::Level::info, "daemon", fmt::format("Disk resizing not needed"));
+    }
+
+    return;
 }
 
 mp::Path mp::backend::convert_to_qcow_if_necessary(const mp::Path& image_path)

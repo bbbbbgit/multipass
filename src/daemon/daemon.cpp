@@ -173,7 +173,8 @@ void prepare_user_data(YAML::Node& user_data_config, YAML::Node& vendor_config)
 }
 
 mp::VirtualMachineDescription to_machine_desc(const mp::LaunchRequest* request, const std::string& name,
-                                              const mp::MemorySize& mem_size, const mp::MemorySize& disk_space,
+                                              const mp::MemorySize& mem_size,
+                                              const mp::optional<mp::MemorySize> disk_space,
                                               const std::string& mac_addr, const std::string& ssh_username,
                                               const mp::VMImage& image, YAML::Node& meta_data_config,
                                               YAML::Node& user_data_config, YAML::Node& vendor_data_config)
@@ -321,16 +322,18 @@ auto validate_create_arguments(const mp::LaunchRequest* request)
     auto option_errors = mp::LaunchError{};
 
     const auto opt_mem_size = try_mem_size(mem_size_str.empty() ? mp::default_memory_size : mem_size_str);
-    const auto opt_disk_space = try_mem_size(disk_space_str.empty() ? mp::default_disk_size : disk_space_str);
+    const auto opt_disk_space =
+        disk_space_str.empty() ? mp::nullopt : mp::make_optional(mp::MemorySize(disk_space_str));
 
-    mp::MemorySize mem_size{}, disk_space{};
+    mp::MemorySize mem_size{};
     if (opt_mem_size && *opt_mem_size >= min_mem)
         mem_size = *opt_mem_size;
     else
         option_errors.add_error_codes(mp::LaunchError::INVALID_MEM_SIZE);
 
-    if (opt_disk_space && *opt_disk_space >= min_disk)
-        disk_space = *opt_disk_space;
+    mp::optional<mp::MemorySize> disk_space{};
+    if (!opt_disk_space || *opt_disk_space >= min_disk)
+        disk_space = opt_disk_space;
     else
         option_errors.add_error_codes(mp::LaunchError::INVALID_DISK_SIZE);
 
@@ -340,7 +343,7 @@ auto validate_create_arguments(const mp::LaunchRequest* request)
     struct CheckedArguments
     {
         mp::MemorySize mem_size;
-        mp::MemorySize disk_space;
+        mp::optional<mp::MemorySize> disk_space;
         std::string instance_name;
         mp::LaunchError option_errors;
     } ret{mem_size, disk_space, instance_name, option_errors};
@@ -1734,7 +1737,7 @@ void mp::Daemon::persist_instances()
         QJsonObject json;
         json.insert("num_cores", specs.num_cores);
         json.insert("mem_size", QString::number(specs.mem_size.in_bytes()));
-        json.insert("disk_space", QString::number(specs.disk_space.in_bytes()));
+        json.insert("disk_space", specs.disk_space ? QString::number(specs.disk_space->in_bytes()) : QString(""));
         json.insert("mac_addr", QString::fromStdString(specs.mac_addr));
         json.insert("ssh_username", QString::fromStdString(specs.ssh_username));
         json.insert("state", static_cast<int>(specs.state));
